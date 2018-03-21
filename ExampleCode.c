@@ -2,12 +2,10 @@
 #include "RFTransceiver.h"
 
 int main (void)
-{
-	InitUSART(1000, true, true); //Initizalize UART
-	
+{	
 	//Select one, as they are both blocking.
-	//debugTransmit(); 
-  	debugReceive();
+	//debugTransmit(1); //Continuously Transmit to device with ID 1
+  	debugReceive(); //Continuously Receive and retransmit depacketized value direceted to all devices.
 
 	return 1; //Exit
 }

@@ -1,8 +1,8 @@
 This library is intended for ATMega*8a devices to communicate using UART over simple
 wireless RF 'ASK' (Amplitude Shift Keying) modules.
 
-Communicates over a Simplex Model, with the receiver having a unique ID value.
-The library can communicate to up to 32 different-IDd receivers.
+Communicates over a Simplex Model, with the receiver having been given a set of ID values to accept.
+The library can communicate to up to 32 different ID values.
 
 The library also implements corruption resistance, with both bytewise checksumming,
  Repetition Code voting, and packet numbering to increase odds of successful delivery.
@@ -14,7 +14,7 @@ All data is published under the MIT License. Read the License doc for more detai
 
 
 Notes on Testing of Reliability:
-Current implementation appears to lose ~1-2% of total packets.
+Current implementation appears to lose ~0.5-2% of total packets.
 Testing was done over the range of 5cm-10m, for times up to 20 minutes.
 Only one truly corrupt packet was seen during the entirety of testing.
 All others were dropped or lost.

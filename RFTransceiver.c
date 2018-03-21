@@ -1,9 +1,15 @@
+/*  ATMega168 UART for ASK Wireless Modules.
+    Author   Warren Holley
+    Version  0.1.5
+    Date     March 14,2017
+    Purpose
+      For transmission and reception of UART over noisy wireless systems.
+      Enpackets data with timing, checksumming, and target-device bytes to minimize packet loss.
+      Intended for use with standard cheap 'RF' modules. (ASK modules, ~$2-$5/e)
+*/
 #include <stdlib.h> //For Memory Allocation
-
 #include <avr/io.h>
 #include <avr/interrupt.h>
-#include <avr/sleep.h>
-
 #include <util/delay.h>
 
 #include "RFTransceiver.h"
@@ -14,23 +20,50 @@ typedef int bool; //Boolean implementation.
 
 //Setup Config:
 #define WIRELESS_BAUD 1000 	//In bits/s
-#define CHIP_ID 0 		//Receiver ID value [0-31]
+
+uint8_t* ChipIDSet;
+uint8_t  ChipIDSize;
 
 // Initialize USART in UART format.
 // Implemented and tested for ATMega168a.
 // TODO: Test with remaining ATMega*8a line.
-void InitUSART (uint16_t dataBaudRate, bool transmitBool, bool receiveBool) {
+
+void InitTransmitter (uint16_t dataBaudRate) {
 	//Calclate USART Baud Rate Register value.
 	uint16_t UBRR_rate = F_CPU/(16*dataBaudRate) - 1;
 	//Set Baud Rate
 	UBRR0H = (unsigned char) (UBRR_rate >> 8); 
 	UBRR0L = (unsigned char) UBRR_rate;
 	//Enable Transmitter and/or Receiver
-	UCSR0B = (transmitBool<<TXEN0)|(receiveBool<<RXEN0);
+	UCSR0B = (1<<TXEN0);
 	// Frame Format: 8 bits of data, 1 stop bit
 	UCSR0C = (1<<UCSZ00) | (1 << UCSZ01);
 
-	sei(); //USART requies interrupts to function.
+	//TODO. Upgrade for setable frame format range.
+	//Defaulting to 8/1 as that is what's needed for the wireless component of the major
+	// Climate Control system that this firmware was built for.
+}
+
+void InitReceiver (uint16_t dataBaudRate, bool transmitBool, uint8_t* receiverID, uint8_t IDSize) {
+
+	//ID Parsing.
+	if (ChipIDSet) //If reinitializing, free previously malloc'd data
+		free(ChipIDSet);
+	ChipIDSet = malloc(IDSize);
+	ChipIDSize = IDSize;
+	//Deep copy, in case of parent thread freeing array.
+	for (int i = 0; i < IDSize; i++)
+		ChipIDSet[i] = receiverID[i];
+	
+	//Calclate USART Baud Rate Register value.
+	uint16_t UBRR_rate = F_CPU/(16*dataBaudRate) - 1;
+	//Set Baud Rate
+	UBRR0H = (unsigned char) (UBRR_rate >> 8); 
+	UBRR0L = (unsigned char) UBRR_rate;
+	//Enable Receiver (and transmitter, if flagged)
+	UCSR0B = (transmitBool<<TXEN0)|(1<<RXEN0);
+	// Frame Format: 8 bits of data, 1 stop bit
+	UCSR0C = (1<<UCSZ00) | (1 << UCSZ01);
 
 	//TODO. Upgrade for setable frame format range.
 	//Defaulting to 8/1 as that is what's needed for the wireless component of the major
@@ -39,7 +72,7 @@ void InitUSART (uint16_t dataBaudRate, bool transmitBool, bool receiveBool) {
 
 //Transmits the raw byte given as an argument.
 //Is blocking until the output buffer is clear.
-void TransmitByte (uint8_t dataByte ) {
+void TransmitByte (uint8_t dataByte) {
 	while (!( UCSR0A & (1<<UDRE0)))
 		; //Delay until data buffer is empty
 	//Push data to transmit buffer
@@ -93,10 +126,12 @@ uint8_t* SecReceiveDataPacket(){
 	return returnBlock;
 }
 
+
 // Monitors receiver for datagrams intended for the device's ID.
 // Attempts to receive the 3-block datagram, parse their values, and return the majority value.
 // Uses basic Repetition Code for voting.
-uint8_t ReceivePersonalPacket(uint8_t ID){
+// Returns a two-byte array: [ID Target][Data Block]
+uint8_t* ReceivePersonalPacket(){
 	
 	bool didVote[3]; 	//Two arrays, boolean if there was a viable packet, and if
 	uint8_t dataVotes[3];	// what the packets value was.
@@ -106,14 +141,21 @@ uint8_t ReceivePersonalPacket(uint8_t ID){
 	}
 
 	//Init: Wait for data packet for this individual device.
+	uint8_t tempReceiverID = 0; //
 	uint8_t* recData = SecReceiveDataPacket();
-	while(recData[0] != ID){
-		free(recData);
-		recData = SecReceiveDataPacket();
+	while(tempReceiverID == 0){
+		for (int i = 0; i < ChipIDSize; i++)
+			if (recData[0] == ChipIDSet[i])
+				tempReceiverID = ChipIDSet[i]; // Then look for this packet ID.
+		
+		if (tempReceiverID == 0) { //If it's still 0, wait for next packet.
+			free(recData);
+			recData = SecReceiveDataPacket();
+		}
 	}
 	
 	//Vote Collation: if packet received, vote on it's value.
-	// recData[1] is the packet#. As no packet repetition, are guarenteed to be in order.
+	// recData[1] is the packet#. Packets are guarenteed to be in order.
 	// Lost or dropped packets are ignored.
 	if (recData[1] == 0){
 		dataVotes[0] = recData[2];
@@ -122,13 +164,13 @@ uint8_t ReceivePersonalPacket(uint8_t ID){
 		free(recData);
 		recData = SecReceiveDataPacket();
 	}
-	if (recData[1] == 1 && recData[0] == ID){
+	if (recData[1] == 1 && recData[0] == tempReceiverID){
 		dataVotes[1] = recData[2];
 		didVote[1] = true;
 		free(recData);
 		recData = SecReceiveDataPacket();
 	}
-	if (recData[1] == 2 && recData[0] == ID){
+	if (recData[1] == 2 && recData[0] == tempReceiverID){
 		dataVotes[2] = recData[2];
 		didVote[2] = true;
 	}// End Vote Collation.
@@ -154,24 +196,51 @@ uint8_t ReceivePersonalPacket(uint8_t ID){
 	// Maybe Manchester Encoding? Would fix a few issues, but only double size.
 	//  Need to test if the decoding and FECC algs would fit in such a tiny device.
 
-	
+
+	//Return Format: [ID Target][Data]
+	uint8_t* returnArray = malloc(2);
+	returnArray[0] = tempReceiverID;
+		
 	if (didVote[0]){
 		if (didVote[1] && didVote[2]){
 			if (dataVotes[0] == dataVotes[1])
-				return dataVotes[0];	   //If ABC, A=B,Ret A;
+				returnArray[1] =  dataVotes[0];	   //If ABC, A=B,Ret A;
 			if (dataVotes[1] == dataVotes[2])
-				return dataVotes[1];	   //If ABC, B=C,Ret C;
+				returnArray[1] =  dataVotes[1];	   //If ABC, B=C,Ret C;
 		}
-		return dataVotes[0];//AB||AC,ret A.
+		returnArray[1] = dataVotes[0];//AB||AC,ret A.
 	}
 	else if (didVote[1])//B||BC, ret B.
-		return dataVotes[1];
+		returnArray[1] = dataVotes[1];
 	else // Only C, ret C.
-		return dataVotes[2];	
+		returnArray[1] = dataVotes[2];	
+	
+	return returnArray;
+	
 }
 
 
-// Steps through Decimal notation of the uint8 value, printing individual characters.
+// Parses Double value into integer and fractional value.
+// Prints these values to the screen. Rounds down to hundreths.
+void printDouble(double number) {
+	uint8_t intPart, fracPart;
+	double doubleIntPart;
+
+	if (number < 0){ //If negative, note as such, invert.
+		TransmitByte('-');
+		number *= -1;
+	}
+	//Translate to uint values.
+	fracPart = (uint8_t) (modf(number, &doubleIntPart)*100);
+	intPart = (uint8_t) doubleIntPart;
+
+	printUInt(intPart);
+	TransmitByte('.');	
+	printUInt(fracPart);
+}
+
+
+// Steps through Decimal notation of the uint8 value, printing individual num-characters.
 void printUInt (uint8_t value){
 	uint16_t divisor=10;
 	uint8_t outputValue;
@@ -181,24 +250,52 @@ void printUInt (uint8_t value){
 		outputValue='0'+(value/divisor)%10;
 		TransmitByte(outputValue);
 	}
-	TransmitByte('\r');
+}
+
+// For sanity's sake.
+// Suggest using sprintf for more advanced strings, but this is simple enough for most.
+// 'length' argument is only for substrings or for arrays with no null terminator.
+// Does not impact performance to overstate the actual string length.
+void debugPrintString(char* string, int length){
+	for (int i = 0; i < length && string[i] != '\0'; i++)
+		TransmitByte(string[i]);
+}
+
+//To reduce headaches.
+void printNewLine () {
+	
+	TransmitByte('\r'); //As some terminals (And windows) don't cooperate with only \n.
 	TransmitByte('\n');
 }
 
-
 //Debug example transmitter.
 //Counts & Transmits 0->99. Repeats
-void debugTransmit(){
+void debugTransmit(uint8_t ChipID){
+	InitTransmitter(1000);
 	for (uint8_t i = 0; i < 100; i = (i+1)%100){
-		SecTransmitPacket(CHIP_ID, i);
-		TransmitByte('\r'); //For some terminals. Seperates lines so that it's not all a block.
-		TransmitByte('\n'); //Is happily discarded as noise by the Receiving side.
+		SecTransmitPacket(ChipID, i);
+		printNewLine();
 		_delay_ms(1000); //Increment & print once per second (or about, with IO delays)
 	}
 }	
 // Debug receiving script.
 // Transmits character string values of received uint 
 void debugReceive(){
-	while(1)
-		printUInt(ReceivePersonalPacket(CHIP_ID));
+	uint8_t ID[3] = {1,2,3}; //Recieve all packets
+	InitReceiver (1000, true, ID, 3);
+
+	uint8_t* packet;
+	while(1) {
+		packet=ReceivePersonalPacket();
+		debugPrintString("Received: Packet for ",50);
+		printUInt(packet[0]);
+		debugPrintString(" with value: ",50);
+		printUInt(packet[1]);
+		printNewLine();
+		free(packet);
+	}
 }
+
+
+
+
